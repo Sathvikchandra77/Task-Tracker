@@ -1,0 +1,6 @@
+version: '3.9'
+services:
+  app:
+    image: sathvikchandra77/tt-api:${BUILD_TAG}
+    ports:
+      - "8081:8000"
