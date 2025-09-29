@@ -1,61 +1,73 @@
 pipeline {
   agent any
   environment {
-    // Jenkins credentials ID for your Docker Hub login
-    DOCKERHUB_CREDENTIALS = 'dockerhub-creds'
-    // Your Docker Hub repository
-    DOCKER_IMAGE = 'sathvikchandra77/tt-api'
-    BUILD_TAG = "${env.BUILD_NUMBER}"
-    RELEASE_TAG = "v${env.BUILD_NUMBER}"
+    DOCKERHUB_CREDENTIALS = 'dockerhub-creds'     // Jenkins creds ID
+    DOCKER_IMAGE = 'sathvikchandra77/tt-api'      // your Docker Hub repo
+    BUILD_TAG    = "${env.BUILD_NUMBER}"
+    RELEASE_TAG  = "v${env.BUILD_NUMBER}"
   }
 
   stages {
 
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
-    stage('Build') {
+    stage('Build Image') {
       steps {
-        bat 'python -m pip install --upgrade pip'
-        bat 'pip install -r requirements.txt'
+        // Build the app image (it already installs requirements.txt)
         bat "docker build -t %DOCKER_IMAGE%:%BUILD_TAG% ."
       }
     }
 
-    stage('Test') {
+    stage('Test (inside Docker)') {
       steps {
-        bat 'python -m pytest -q --junitxml=report.xml'
+        // Run pytest INSIDE the container with workspace mounted at /work
+        // Write JUnit report to the host workspace.
+        bat """
+          docker run --rm ^
+            -e PYTHONPATH=/work ^
+            -v %CD%:/work ^
+            -w /work ^
+            %DOCKER_IMAGE%:%BUILD_TAG% ^
+            python -m pytest -q --junitxml=report.xml
+        """
       }
       post {
-        always {
-          junit 'report.xml'
-        }
+        always { junit 'report.xml' }
       }
     }
 
-    stage('Security') {
+    stage('Security (inside Docker)') {
       steps {
-        bat 'pip install bandit pip-audit'
-        // run Bandit and pip-audit; allow build to continue even if issues are found
-        bat 'bandit -r app -f txt -o bandit.txt || exit 0'
-        bat 'pip-audit -r requirements.txt -f json -o pip_audit.json || exit 0'
+        // bandit: write findings to bandit.txt in workspace
+        bat """
+          docker run --rm ^
+            -v %CD%:/work ^
+            -w /work ^
+            %DOCKER_IMAGE%:%BUILD_TAG% ^
+            bandit -r app -f txt -o bandit.txt || exit 0
+        """
+        // pip-audit: audit requirements.txt; write JSON to workspace
+        bat """
+          docker run --rm ^
+            -v %CD%:/work ^
+            -w /work ^
+            %DOCKER_IMAGE%:%BUILD_TAG% ^
+            pip-audit -r requirements.txt -f json -o pip_audit.json || exit 0
+        """
       }
       post {
-        always {
-          archiveArtifacts artifacts: 'bandit.txt,pip_audit.json', fingerprint: true
-        }
+        always { archiveArtifacts artifacts: 'bandit.txt,pip_audit.json', fingerprint: true }
       }
     }
 
     stage('Deploy (Staging)') {
       steps {
-        // timeout 3 seconds and then check health endpoint
+        // Bring up staging (maps 8081->8000); verify /health
         bat "docker compose -f docker-compose.staging.yml up -d --build"
         bat "timeout /t 3 >nul"
-        bat "powershell -Command \"Invoke-WebRequest http://localhost:8081/health -UseBasicParsing\""
+        bat "powershell -Command \"Invoke-WebRequest http://localhost:8081/health -UseBasicParsing | Out-Null\""
       }
     }
 
@@ -70,12 +82,13 @@ pipeline {
         bat "docker push %DOCKER_IMAGE%:%RELEASE_TAG%"
         bat "docker compose -f docker-compose.prod.yml up -d"
         bat "timeout /t 5 >nul"
-        bat "powershell -Command \"Invoke-WebRequest http://localhost:8080/health -UseBasicParsing\""
+        bat "powershell -Command \"Invoke-WebRequest http://localhost:8080/health -UseBasicParsing | Out-Null\""
       }
     }
 
     stage('Monitoring & Evidence') {
       steps {
+        // Save a copy of prod health response as build artifact
         bat "powershell -Command \"Invoke-WebRequest http://localhost:8080/health -UseBasicParsing | Out-File -Encoding utf8 health_status.json\""
         archiveArtifacts artifacts: 'health_status.json', fingerprint: true
       }
@@ -83,8 +96,6 @@ pipeline {
   }
 
   post {
-    always {
-      echo "Pipeline finished with status: ${currentBuild.currentResult}"
-    }
+    always { echo "Pipeline finished with status: ${currentBuild.currentResult}" }
   }
 }
