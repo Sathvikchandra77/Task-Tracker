@@ -66,7 +66,7 @@ pipeline {
       steps {
         // Bring up staging (maps 8081->8000); verify /health
         bat "docker compose -f docker-compose.staging.yml up -d --build"
-        bat "timeout /t 3 >nul"
+        bat "timeout /t 3"
         bat "powershell -Command \"Invoke-WebRequest http://localhost:8081/health -UseBasicParsing | Out-Null\""
       }
     }
